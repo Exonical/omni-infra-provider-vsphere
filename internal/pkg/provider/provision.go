@@ -93,9 +93,9 @@ func (p *Provisioner) ensureVM(ctx context.Context, logger *zap.Logger, pctx pro
 		return fmt.Errorf("failed to find datastore %s: %w", data.Datastore, err)
 	}
 
-	network, err := finder.Network(ctx, data.Network)
+	network, err := finder.Network(ctx, data.PortGroup)
 	if err != nil {
-		return fmt.Errorf("failed to find network %s: %w", data.Network, err)
+		return fmt.Errorf("failed to find network %s: %w", data.PortGroup, err)
 	}
 
 	templateVM, err := finder.VirtualMachine(ctx, data.Template)
@@ -204,6 +204,14 @@ func (p *Provisioner) createCloneSpec(ctx context.Context, pctx provision.Contex
 				Value: "base64",
 			},
 		},
+	}
+
+	// Enable EFI Secure Boot if requested
+	if data.SecureBoot {
+		// Set firmware to EFI and enable secure boot
+		config.Firmware = "efi"
+		sb := true
+		config.BootOptions = &types.VirtualMachineBootOptions{EfiSecureBootEnabled: &sb}
 	}
 
 	cloneSpec := types.VirtualMachineCloneSpec{

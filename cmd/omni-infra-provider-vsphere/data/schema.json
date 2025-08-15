@@ -1,31 +1,64 @@
 {
-    "type": "object",
-    "properties": {
-      "cores": {
-        "type": "integer",
-        "minimum": 1
-      },
-      "memory": {
-        "type": "integer",
-        "minimum": 2048
-      },
-      "architecture": {
-        "enum": ["amd64", "arm64"]
-      },
-      "disk_size": {
-        "type": "integer",
-        "minimum": 5,
-        "description": "In GB"
-      },
-      "network_binding": {
-        "enum": ["bridge", "passt"],
-        "default": "bridge"
-      }
+  "type": "object",
+  "properties": {
+    "cpus": {
+      "title": "Cpus",
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of virtual CPUs"
     },
-    "required": [
-      "cores",
-      "memory",
-      "architecture",
-      "disk_size"
-    ]
-  }
+    "memory_mb": {
+      "title": "Memory Mb",
+      "type": "integer",
+      "minimum": 1024,
+      "description": "Memory size in MiB"
+    },
+    "disk_gib": {
+      "title": "Disk Gib",
+      "type": "integer",
+      "minimum": 5,
+      "description": "Primary disk size in GiB"
+    },
+    "datacenter": {
+      "title": "Datacenter",
+      "type": "string",
+      "description": "vSphere Datacenter name or path"
+    },
+    "cluster": {
+      "title": "Cluster",
+      "type": "string",
+      "description": "vSphere Cluster name or path"
+    },
+    "datastore": {
+      "title": "Datastore",
+      "type": "string",
+      "description": "vSphere Datastore name or path"
+    },
+    "template": {
+      "title": "Template",
+      "type": "string",
+      "description": "Path to the VM template to clone from"
+    },
+    "port_group": {
+      "title": "Port Group",
+      "type": "string",
+      "description": "Network port group to attach the NIC to"
+    },
+    "secure_boot": {
+      "title": "Secure Boot",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable EFI Secure Boot (requires EFI firmware)"
+    }
+  },
+  "required": [
+    "cpus",
+    "memory_mb",
+    "disk_gib",
+    "datacenter",
+    "cluster",
+    "datastore",
+    "template",
+    "port_group"
+  ]
+}

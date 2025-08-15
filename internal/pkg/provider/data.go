@@ -9,9 +9,10 @@ type Data struct {
 	Datacenter string `yaml:"datacenter"`
 	Datastore  string `yaml:"datastore"`
 	Cluster    string `yaml:"cluster"`
-	Network    string `yaml:"network"`
+	PortGroup  string `yaml:"port_group"`
 	Template   string `yaml:"template"`
 	CPUs       int32  `yaml:"cpus"`
 	MemoryMB   int64  `yaml:"memory_mb"`
 	DiskGiB    int64  `yaml:"disk_gib"`
+	SecureBoot bool   `yaml:"secure_boot"`
 }

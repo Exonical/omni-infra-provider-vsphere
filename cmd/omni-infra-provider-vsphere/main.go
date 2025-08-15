@@ -9,6 +9,7 @@ import (
     "context"
     _ "embed"
     "encoding/base64"
+    "encoding/json"
     "fmt"
     "net/url"
     "os"
@@ -19,6 +20,10 @@ import (
     "github.com/siderolabs/omni/client/pkg/infra"
     "github.com/spf13/cobra"
     "github.com/vmware/govmomi"
+    "github.com/vmware/govmomi/find"
+    "github.com/vmware/govmomi/property"
+    "github.com/vmware/govmomi/vim25/mo"
+    "github.com/vmware/govmomi/vim25/types"
     "go.uber.org/zap"
     "go.uber.org/zap/zapcore"
 
@@ -77,12 +82,20 @@ var rootCmd = &cobra.Command{
         // Provisioner
         provisioner := provider.NewProvisioner(vsc, logger)
 
+        // Build dynamic schema with enums from vSphere so UI renders drop-downs
+        dynSchema := schema
+        if s, derr := buildDynamicSchema(cmd.Context(), vsc); derr == nil {
+            dynSchema = s
+        } else {
+            logger.Warn("failed to build dynamic schema, falling back to static", zap.Error(derr))
+        }
+
         // Infra provider
         ip, err := infra.NewProvider(meta.ProviderID, provisioner, infra.ProviderConfig{
             Name:        cfg.providerName,
             Description: cfg.providerDescription,
             Icon:        base64.RawStdEncoding.EncodeToString(icon),
-            Schema:      schema,
+            Schema:      dynSchema,
         })
         if err != nil {
             return fmt.Errorf("failed to create infra provider: %w", err)
@@ -142,4 +155,99 @@ func init() {
     rootCmd.Flags().StringVar(&cfg.vsphereURL, "vsphere-url", os.Getenv("VSPHERE_URL"), "vSphere API URL")
     rootCmd.Flags().StringVar(&cfg.vsphereUsername, "vsphere-username", os.Getenv("VSPHERE_USERNAME"), "vSphere username")
     rootCmd.Flags().StringVar(&cfg.vspherePassword, "vsphere-password", os.Getenv("VSPHERE_PASSWORD"), "vSphere password")
+}
+
+// buildDynamicSchema queries vSphere inventory and injects enums into the JSON schema
+// for fields that should be rendered as drop-downs: datacenter, cluster, datastore, template, port_group.
+func buildDynamicSchema(ctx context.Context, vc *govmomi.Client) (string, error) {
+    // Unmarshal embedded schema into a generic map
+    var m map[string]any
+    if err := json.Unmarshal([]byte(schema), &m); err != nil {
+        return "", fmt.Errorf("unmarshal schema: %w", err)
+    }
+
+    props, _ := m["properties"].(map[string]any)
+    if props == nil {
+        return "", fmt.Errorf("schema missing properties")
+    }
+
+    f := find.NewFinder(vc.Client)
+
+    // Datacenters
+    if dcs, err := f.DatacenterList(ctx, "*"); err == nil {
+        vals := make([]string, 0, len(dcs))
+        for _, dc := range dcs {
+            vals = append(vals, dc.Name())
+        }
+        injectEnum(props, "datacenter", vals)
+    }
+
+    // Clusters
+    if cls, err := f.ClusterComputeResourceList(ctx, "*"); err == nil {
+        vals := make([]string, 0, len(cls))
+        for _, c := range cls {
+            vals = append(vals, c.Name())
+        }
+        injectEnum(props, "cluster", vals)
+    }
+
+    // Datastores
+    if dss, err := f.DatastoreList(ctx, "*"); err == nil {
+        vals := make([]string, 0, len(dss))
+        for _, ds := range dss {
+            vals = append(vals, ds.Name())
+        }
+        injectEnum(props, "datastore", vals)
+    }
+
+    // Networks / Port Groups
+    if nets, err := f.NetworkList(ctx, "*"); err == nil {
+        vals := make([]string, 0, len(nets))
+        for _, n := range nets {
+            // Use the managed object reference ID as value; name retrieval is more involved
+            vals = append(vals, n.Reference().Value)
+        }
+        if len(vals) > 0 {
+            injectEnum(props, "port_group", vals)
+        }
+    }
+
+    // Templates: list VMs and filter by Config.Template
+    if vms, err := f.VirtualMachineList(ctx, "*"); err == nil {
+        pc := property.DefaultCollector(vc.Client)
+        refs := make([]types.ManagedObjectReference, 0, len(vms))
+        for _, vm := range vms {
+            refs = append(refs, vm.Reference())
+        }
+        var mvm []mo.VirtualMachine
+        if err := pc.Retrieve(ctx, refs, []string{"summary", "config"}, &mvm); err == nil {
+            vals := make([]string, 0, len(mvm))
+            for i, vm := range mvm {
+                if vm.Config != nil && vm.Config.Template {
+                    vals = append(vals, vms[i].Name())
+                }
+            }
+            if len(vals) > 0 {
+                injectEnum(props, "template", vals)
+            }
+        }
+    }
+
+    out, err := json.Marshal(m)
+    if err != nil {
+        return "", fmt.Errorf("marshal schema: %w", err)
+    }
+    return string(out), nil
+}
+
+func injectEnum(props map[string]any, key string, values []string) {
+    p, ok := props[key].(map[string]any)
+    if !ok || len(values) == 0 {
+        return
+    }
+    arr := make([]any, 0, len(values))
+    for _, v := range values {
+        arr = append(arr, v)
+    }
+    p["enum"] = arr
 }

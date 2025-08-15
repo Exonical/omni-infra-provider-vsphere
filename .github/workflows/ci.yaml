@@ -82,9 +82,9 @@ jobs:
       - name: unit-tests-race
         run: |
           make unit-tests-race
-      - name: omni-infra-provider-kubevirt
+      - name: omni-infra-provider-vsphere
         run: |
-          make omni-infra-provider-kubevirt
+          make omni-infra-provider-vsphere
       - name: lint
         run: |
           make lint
@@ -95,21 +95,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-      - name: image-omni-infra-provider-kubevirt
+      - name: image-omni-infra-provider-vsphere
         run: |
-          make image-omni-infra-provider-kubevirt
-      - name: push-omni-infra-provider-kubevirt
+          make image-omni-infra-provider-vsphere
+      - name: push-omni-infra-provider-vsphere
         if: github.event_name != 'pull_request'
         env:
           PUSH: "true"
         run: |
-          make image-omni-infra-provider-kubevirt
-      - name: push-omni-infra-provider-kubevirt-latest
+          make image-omni-infra-provider-vsphere
+      - name: push-omni-infra-provider-vsphere-latest
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           PUSH: "true"
         run: |
-          make image-omni-infra-provider-kubevirt IMAGE_TAG=latest
+          make image-omni-infra-provider-vsphere IMAGE_TAG=latest
       - name: run-integration-test
         run: |
           sudo -E make run-integration-test
@@ -138,14 +138,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: omni-logs
-          path: /tmp/kubevirt-e2e/*.log
+          path: /tmp/vsphere-e2e/*.log
           retention-days: "5"
       - name: Generate Checksums
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd _out
-          sha256sum omni-infra-provider-kubevirt-* > sha256sum.txt
-          sha512sum omni-infra-provider-kubevirt-* > sha512sum.txt
+          sha256sum omni-infra-provider-vsphere-* > sha256sum.txt
+          sha512sum omni-infra-provider-vsphere-* > sha512sum.txt
       - name: release-notes
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -157,5 +157,5 @@ jobs:
           body_path: _out/RELEASE_NOTES.md
           draft: "true"
           files: |-
-            _out/omni-infra-provider-kubevirt-*
+            _out/omni-infra-provider-vsphere-*
             _out/sha*.txt

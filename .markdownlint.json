@@ -2,13 +2,8 @@
 #
 # Generated on 2025-08-17T01:11:24Z by kres 696c7c7.
 
-*
-!api
-!cmd
-!internal
-!go.mod
-!go.sum
-!.golangci.yml
-!README.md
-!.markdownlint.json
-!hack/govulncheck.sh
+{
+    "MD013": false,
+    "MD033": false,
+    "default": true
+  }

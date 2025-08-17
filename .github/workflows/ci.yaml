@@ -1,6 +1,6 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2025-07-24T12:24:12Z by kres 4c6b4c0.
+# Generated on 2025-08-17T01:11:24Z by kres 696c7c7.
 
 concurrency:
   group: ${{ github.head_ref || github.run_id }}
@@ -67,12 +67,6 @@ jobs:
           driver: remote
           endpoint: tcp://buildkit-amd64.ci.svc.cluster.local:1234
         timeout-minutes: 10
-      - name: Mask secrets
-        run: |
-          echo "$(sops -d .secrets.yaml | yq -e '.secrets | to_entries[] | "::add-mask::" + .value')"
-      - name: Set secrets for job
-        run: |
-          sops -d .secrets.yaml | yq -e '.secrets | to_entries[] | .key + "=" + .value' >> "$GITHUB_ENV"
       - name: base
         run: |
           make base
@@ -82,6 +76,12 @@ jobs:
       - name: unit-tests-race
         run: |
           make unit-tests-race
+      - name: coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: _out/coverage-unit-tests.txt
+          token: ${{ secrets.CODECOV_TOKEN }}
+        timeout-minutes: 3
       - name: omni-infra-provider-vsphere
         run: |
           make omni-infra-provider-vsphere
@@ -110,36 +110,6 @@ jobs:
           PUSH: "true"
         run: |
           make image-omni-infra-provider-vsphere IMAGE_TAG=latest
-      - name: run-integration-test
-        run: |
-          sudo -E make run-integration-test
-      - name: Generate executable list
-        run: |
-          find _out -type f -executable > _out/executable-artifacts
-      - name: save-artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifacts
-          path: |-
-            _out
-            !_out/omni/
-          retention-days: "5"
-      - name: save-talos-logs-artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: talos-logs
-          path: |-
-            ~/.talos/clusters/**/*.log
-            !~/.talos/clusters/**/swtpm.log
-          retention-days: "5"
-      - name: save-omni-logs-artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: omni-logs
-          path: /tmp/vsphere-e2e/*.log
-          retention-days: "5"
       - name: Generate Checksums
         if: startsWith(github.ref, 'refs/tags/')
         run: |

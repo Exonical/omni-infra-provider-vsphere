@@ -1,0 +1,11 @@
+# commit to be tagged for the new release
+commit = "HEAD"
+
+project_name = "omni-infra-provider-vsphere"
+github_repo = "Exonical/omni-infra-provider-vsphere"
+match_deps = "^github.com/(Exonical/[a-zA-Z0-9-]+)$"
+
+# previous = -
+# pre_release = true
+
+# [notes]

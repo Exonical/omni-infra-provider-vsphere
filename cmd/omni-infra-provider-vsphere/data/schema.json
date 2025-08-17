@@ -39,6 +39,16 @@
       "type": "string",
       "description": "Path to the VM template to clone from"
     },
+    "content_library": {
+      "title": "Content Library",
+      "type": "string",
+      "description": "vSphere Content Library name (optional, use instead of template)"
+    },
+    "content_library_item": {
+      "title": "Content Library Item",
+      "type": "string",
+      "description": "Content Library item/template to clone from (required if content_library is specified)"
+    },
     "port_group": {
       "title": "Port Group",
       "type": "string",
@@ -58,7 +68,14 @@
     "datacenter",
     "cluster",
     "datastore",
-    "template",
     "port_group"
+  ],
+  "oneOf": [
+    {
+      "required": ["template"]
+    },
+    {
+      "required": ["content_library", "content_library_item"]
+    }
   ]
 }

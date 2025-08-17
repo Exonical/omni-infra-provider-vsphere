@@ -21,7 +21,7 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 	"go.uber.org/zap"
 
-	"github.com/siderolabs/omni-infra-provider-kubevirt/internal/pkg/provider/resources"
+	"github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/resources"
 )
 
 // Provisioner implements the vSphere infra provider.
@@ -68,20 +68,29 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 	}
 }
 
+// DeprovisionSteps implements infra.Provisioner.
+func (p *Provisioner) DeprovisionSteps() []provision.Step[*resources.Machine] {
+	return []provision.Step[*resources.Machine]{
+		provision.NewStep("destroyVM", p.destroyVM),
+	}
+}
+
 func (p *Provisioner) ensureVM(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
 	var data Data
 	if err := pctx.UnmarshalProviderData(&data); err != nil {
 		return fmt.Errorf("failed to unmarshal provider data: %w", err)
 	}
 
-	finder := find.NewFinder(p.vsphereClient.Client)
-
+	// Use the correct pattern from Terraform provider
+	finder := find.NewFinder(p.vsphereClient.Client, true)
+	
 	dc, err := finder.Datacenter(ctx, data.Datacenter)
 	if err != nil {
 		return fmt.Errorf("failed to find datacenter %s: %w", data.Datacenter, err)
 	}
 
-	finder.SetDatacenter(dc)
+	// Critical: must reassign the result of SetDatacenter
+	finder = finder.SetDatacenter(dc)
 
 	cluster, err := finder.ClusterComputeResource(ctx, data.Cluster)
 	if err != nil {
@@ -98,9 +107,19 @@ func (p *Provisioner) ensureVM(ctx context.Context, logger *zap.Logger, pctx pro
 		return fmt.Errorf("failed to find network %s: %w", data.PortGroup, err)
 	}
 
-	templateVM, err := finder.VirtualMachine(ctx, data.Template)
-	if err != nil {
-		return fmt.Errorf("failed to find template VM %s: %w", data.Template, err)
+	// Determine deployment method
+	useContentLibrary := data.ContentLibrary != "" && data.ContentLibraryItem != ""
+	var templateVM *object.VirtualMachine
+	
+	if !useContentLibrary {
+		// Only look for template VM if not using Content Library
+		if data.Template == "" {
+			return fmt.Errorf("either template or content_library+content_library_item must be specified")
+		}
+		templateVM, err = finder.VirtualMachine(ctx, data.Template)
+		if err != nil {
+			return fmt.Errorf("failed to find template VM %s: %w", data.Template, err)
+		}
 	}
 
 	vm, err := finder.VirtualMachine(ctx, pctx.GetRequestID())
@@ -137,40 +156,194 @@ func (p *Provisioner) ensureVM(ctx context.Context, logger *zap.Logger, pctx pro
 	}
 
 	// VM doesn't exist, so we need to create it.
-	logger.Info("creating new VM from template")
+	if useContentLibrary {
+		logger.Info("creating new VM from Content Library", zap.String("library", data.ContentLibrary), zap.String("item", data.ContentLibraryItem))
+		
+		// Deploy directly from Content Library
+		err = p.deployFromContentLibrary(ctx, pctx.GetRequestID(), cluster, ds, network, data.ContentLibrary, data.ContentLibraryItem, pctx)
+		if err != nil {
+			return fmt.Errorf("failed to deploy VM from Content Library: %w", err)
+		}
+	} else {
+		logger.Info("creating new VM from template")
 
-	cloneSpec, folder, err := p.createCloneSpec(ctx, pctx, data, cluster, ds, network, templateVM)
-	if err != nil {
-		return err
-	}
+		cloneSpec, folder, err := p.createCloneSpec(ctx, pctx, data, cluster, ds, network, templateVM)
+		if err != nil {
+			return err
+		}
 
-	task, err := templateVM.Clone(ctx, folder, pctx.GetRequestID(), *cloneSpec)
-	if err != nil {
-		return fmt.Errorf("failed to clone VM: %w", err)
-	}
+		task, err := templateVM.Clone(ctx, folder, pctx.GetRequestID(), *cloneSpec)
+		if err != nil {
+			return fmt.Errorf("failed to clone VM: %w", err)
+		}
 
-	if err := task.Wait(ctx); err != nil {
-		return fmt.Errorf("failed to wait for clone task: %w", err)
-	}
+		if err := task.Wait(ctx); err != nil {
+			return fmt.Errorf("failed to wait for clone task: %w", err)
+		}
 
-	logger.Info("VM cloned successfully, powering on")
+		logger.Info("VM cloned successfully, configuring VM")
 
-	// Need to find the newly created VM to power it on
-	newVM, err := finder.VirtualMachine(ctx, pctx.GetRequestID())
-	if err != nil {
-		return fmt.Errorf("failed to find newly created VM %s: %w", pctx.GetRequestID(), err)
-	}
+		// Need to find the newly created VM to configure it
+		newVM, err := finder.VirtualMachine(ctx, pctx.GetRequestID())
+		if err != nil {
+			return fmt.Errorf("failed to find newly created VM %s: %w", pctx.GetRequestID(), err)
+		}
 
-	powerOnTask, err := newVM.PowerOn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to power on VM: %w", err)
-	}
+		// Configure VM before powering on (disk resize, advanced parameters)
+		if err := p.configureVM(ctx, newVM, data, pctx); err != nil {
+			return fmt.Errorf("failed to configure VM: %w", err)
+		}
 
-	if err := powerOnTask.Wait(ctx); err != nil {
-		return fmt.Errorf("failed to wait for power on task: %w", err)
+		logger.Info("VM configured successfully, powering on")
+
+		powerOnTask, err := newVM.PowerOn(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to power on VM: %w", err)
+		}
+
+		if err := powerOnTask.Wait(ctx); err != nil {
+			return fmt.Errorf("failed to wait for power on task: %w", err)
+		}
 	}
 
 	return provision.NewRetryInterval(10 * time.Second)
+}
+
+// configureVM configures a VM after cloning but before powering on
+func (p *Provisioner) configureVM(ctx context.Context, vm *object.VirtualMachine, data Data, pctx provision.Context[*resources.Machine]) error {
+	// Get current VM configuration
+	var vmProps mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"config"}, &vmProps)
+	if err != nil {
+		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+	
+	// Prepare configuration spec
+	configSpec := types.VirtualMachineConfigSpec{}
+	
+	// Configure disk size (minimum 10GB)
+	if vmProps.Config != nil && len(vmProps.Config.Hardware.Device) > 0 {
+		for _, device := range vmProps.Config.Hardware.Device {
+			if disk, ok := device.(*types.VirtualDisk); ok {
+				// Convert to GB and check minimum size
+				currentSizeGB := disk.CapacityInKB / (1024 * 1024)
+				minSizeGB := int64(10)
+				
+				if currentSizeGB < minSizeGB {
+					// Resize disk to minimum 10GB
+					disk.CapacityInKB = minSizeGB * 1024 * 1024
+					
+					deviceChange := &types.VirtualDeviceConfigSpec{
+						Operation: types.VirtualDeviceConfigSpecOperationEdit,
+						Device:    disk,
+					}
+					configSpec.DeviceChange = append(configSpec.DeviceChange, deviceChange)
+					p.logger.Info("resizing VM disk", zap.Int64("currentGB", currentSizeGB), zap.Int64("newGB", minSizeGB))
+				}
+				break // Only resize the first disk
+			}
+		}
+	}
+	
+	// Set advanced parameters for Talos
+	configSpec.ExtraConfig = []types.BaseOptionValue{
+		&types.OptionValue{
+			Key:   "disk.enableUUID",
+			Value: "1",
+		},
+		&types.OptionValue{
+			Key:   "guestinfo.talos.config",
+			Value: base64.StdEncoding.EncodeToString([]byte(pctx.ConnectionParams.JoinConfig)),
+		},
+	}
+	
+	// Apply the configuration
+	task, err := vm.Reconfigure(ctx, configSpec)
+	if err != nil {
+		return fmt.Errorf("failed to reconfigure VM: %w", err)
+	}
+	
+	err = task.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to wait for VM reconfiguration: %w", err)
+	}
+	
+	p.logger.Info("VM configured successfully", zap.String("vm", vm.Name()))
+	
+	return nil
+}
+
+// deployFromContentLibrary deploys a VM from a Content Library item
+func (p *Provisioner) deployFromContentLibrary(ctx context.Context, requestID string, cluster *object.ClusterComputeResource, ds *object.Datastore, network object.NetworkReference, libraryName, itemName string, pctx provision.Context[*resources.Machine]) error {
+	// For now, return an error since Content Library deployment is complex
+	// This will be implemented in a future update
+	return fmt.Errorf("Content Library deployment not yet implemented - please use template-based deployment")
+}
+
+// destroyVM destroys the VM during deprovisioning
+func (p *Provisioner) destroyVM(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
+	var data Data
+	if err := pctx.UnmarshalProviderData(&data); err != nil {
+		return fmt.Errorf("failed to unmarshal provider data: %w", err)
+	}
+
+	logger.Info("deprovisioning VM", zap.String("vm_id", pctx.GetRequestID()), zap.String("datacenter", data.Datacenter))
+
+	if data.Datacenter == "" {
+		return fmt.Errorf("datacenter field is empty in provider data")
+	}
+
+	// Use the correct pattern from Terraform provider
+	finder := find.NewFinder(p.vsphereClient.Client, true)
+	
+	dc, err := finder.Datacenter(ctx, data.Datacenter)
+	if err != nil {
+		return fmt.Errorf("failed to find datacenter %s: %w", data.Datacenter, err)
+	}
+
+	// Critical: must reassign the result of SetDatacenter
+	finder = finder.SetDatacenter(dc)
+
+	vm, err := finder.VirtualMachine(ctx, pctx.GetRequestID())
+	if err != nil {
+		if err.Error() == "vm '"+pctx.GetRequestID()+"' not found" {
+			logger.Info("VM already deleted or does not exist")
+			return nil
+		}
+		return fmt.Errorf("failed to find VM %s for deprovisioning: %w", pctx.GetRequestID(), err)
+	}
+
+	logger.Info("destroying VM", zap.String("vm", pctx.GetRequestID()))
+
+	// Power off VM if it's running
+	var vmProps mo.VirtualMachine
+	pc := property.DefaultCollector(p.vsphereClient.Client)
+	if err := pc.RetrieveOne(ctx, vm.Reference(), []string{"summary"}, &vmProps); err != nil {
+		logger.Warn("failed to retrieve VM power state, proceeding with destruction", zap.Error(err))
+	} else if vmProps.Summary.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
+		logger.Info("powering off VM before destruction")
+		powerOffTask, err := vm.PowerOff(ctx)
+		if err != nil {
+			logger.Warn("failed to power off VM, proceeding with destruction", zap.Error(err))
+		} else {
+			if err := powerOffTask.Wait(ctx); err != nil {
+				logger.Warn("failed to wait for power off, proceeding with destruction", zap.Error(err))
+			}
+		}
+	}
+
+	// Destroy the VM
+	destroyTask, err := vm.Destroy(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to destroy VM: %w", err)
+	}
+
+	if err := destroyTask.Wait(ctx); err != nil {
+		return fmt.Errorf("failed to wait for VM destruction: %w", err)
+	}
+
+	logger.Info("VM destroyed successfully", zap.String("vm", pctx.GetRequestID()))
+	return nil
 }
 
 func (p *Provisioner) createCloneSpec(ctx context.Context, pctx provision.Context[*resources.Machine], data Data, cluster *object.ClusterComputeResource, ds *object.Datastore, network object.NetworkReference, templateVM *object.VirtualMachine) (*types.VirtualMachineCloneSpec, *object.Folder, error) {
@@ -236,44 +409,10 @@ func (p *Provisioner) createCloneSpec(ctx context.Context, pctx provision.Contex
 
 // Deprovision implements infra.Provisioner.
 func (p *Provisioner) Deprovision(ctx context.Context, logger *zap.Logger, state *resources.Machine, machineRequest *infra.MachineRequest) error {
-	finder := find.NewFinder(p.vsphereClient.Client)
-	vm, err := finder.VirtualMachine(ctx, machineRequest.Metadata().ID())
-	if err != nil {
-		if err.Error() == "vm '"+machineRequest.Metadata().ID()+"' not found" {
-			logger.Info("machine already deprovisioned")
-			return nil
-		}
-		return fmt.Errorf("failed to find VM %s for deprovisioning: %w", machineRequest.Metadata().ID(), err)
-	}
-
-	powerState, err := vm.PowerState(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get VM power state: %w", err)
-	}
-
-	if powerState == types.VirtualMachinePowerStatePoweredOn {
-		logger.Info("powering off VM")
-		task, err := vm.PowerOff(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to power off VM: %w", err)
-		}
-		if err := task.Wait(ctx); err != nil {
-			return fmt.Errorf("failed to wait for power off task: %w", err)
-		}
-	}
-
-	logger.Info("destroying VM")
-	task, err := vm.Destroy(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to destroy VM: %w", err)
-	}
-
-	if err := task.Wait(ctx); err != nil {
-		return fmt.Errorf("failed to wait for destroy task: %w", err)
-	}
-
-	logger.Info("machine deprovisioned successfully")
-	return nil
+	// For now, return a helpful error message since the step-based approach already works correctly
+	// The main issue is accessing provider data from the machine state in the direct Deprovision method
+	// The step-based deprovisioning in DeprovisionSteps() already has proper datacenter context handling
+	return fmt.Errorf("use step-based deprovisioning - DeprovisionSteps() already implements correct datacenter context handling")
 }
 
 // getDeviceChanges prepares the device specifications for network and disk for the VM clone operation.

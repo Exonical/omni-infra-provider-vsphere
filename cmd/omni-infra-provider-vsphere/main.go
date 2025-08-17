@@ -6,29 +6,31 @@
 package main
 
 import (
-    "context"
-    _ "embed"
-    "encoding/base64"
-    "encoding/json"
-    "fmt"
-    "net/url"
-    "os"
-    "os/signal"
-    "syscall"
+	"context"
+	_ "embed"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
 
-    "github.com/siderolabs/omni/client/pkg/client"
-    "github.com/siderolabs/omni/client/pkg/infra"
-    "github.com/spf13/cobra"
-    "github.com/vmware/govmomi"
-    "github.com/vmware/govmomi/find"
-    "github.com/vmware/govmomi/property"
-    "github.com/vmware/govmomi/vim25/mo"
-    "github.com/vmware/govmomi/vim25/types"
-    "go.uber.org/zap"
-    "go.uber.org/zap/zapcore"
+	"github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider"
+	"github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/meta"
 
-    "github.com/siderolabs/omni-infra-provider-kubevirt/internal/pkg/provider"
-    "github.com/siderolabs/omni-infra-provider-kubevirt/internal/pkg/provider/meta"
+	"github.com/siderolabs/omni/client/pkg/client"
+	"github.com/siderolabs/omni/client/pkg/infra"
+	"github.com/spf13/cobra"
+	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/vapi/library"
+	"github.com/vmware/govmomi/vapi/rest"
+	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/types"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 //go:embed data/schema.json
@@ -68,24 +70,28 @@ var rootCmd = &cobra.Command{
         }
 
         // vSphere client
+        logger.Info("parsing vSphere URL")
         vsURL, err := url.Parse(cfg.vsphereURL)
         if err != nil {
             return fmt.Errorf("invalid vSphere URL: %w", err)
         }
         vsURL.User = url.UserPassword(cfg.vsphereUsername, cfg.vspherePassword)
 
+        logger.Info("creating vSphere client", zap.String("url", vsURL.String()))
         vsc, err := govmomi.NewClient(cmd.Context(), vsURL, true)
         if err != nil {
             return fmt.Errorf("failed to create vSphere client: %w", err)
         }
+        logger.Info("successfully created vSphere client")
 
         // Provisioner
         provisioner := provider.NewProvisioner(vsc, logger)
 
         // Build dynamic schema with enums from vSphere so UI renders drop-downs
         dynSchema := schema
-        if s, derr := buildDynamicSchema(cmd.Context(), vsc); derr == nil {
+        if s, derr := buildDynamicSchema(cmd.Context(), vsc, logger); derr == nil {
             dynSchema = s
+            logger.Info("successfully built dynamic schema with vSphere inventory")
         } else {
             logger.Warn("failed to build dynamic schema, falling back to static", zap.Error(derr))
         }
@@ -123,10 +129,10 @@ var cfg struct {
     serviceAccountKey   string
     providerName        string
     providerDescription string
-    insecureSkipVerify  bool
     vsphereURL          string
     vsphereUsername     string
     vspherePassword     string
+    insecureSkipVerify  bool
 }
 
 func main() {
@@ -159,19 +165,22 @@ func init() {
 
 // buildDynamicSchema queries vSphere inventory and injects enums into the JSON schema
 // for fields that should be rendered as drop-downs: datacenter, cluster, datastore, template, port_group.
-func buildDynamicSchema(ctx context.Context, vc *govmomi.Client) (string, error) {
+func buildDynamicSchema(ctx context.Context, vc *govmomi.Client, logger *zap.Logger) (string, error) {
     // Unmarshal embedded schema into a generic map
     var m map[string]any
     if err := json.Unmarshal([]byte(schema), &m); err != nil {
         return "", fmt.Errorf("unmarshal schema: %w", err)
     }
 
-    props, _ := m["properties"].(map[string]any)
+    	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("schema missing 'properties' field or it has wrong type")
+	}
     if props == nil {
         return "", fmt.Errorf("schema missing properties")
     }
 
-    f := find.NewFinder(vc.Client)
+    f := find.NewFinder(vc.Client, true)
 
     // Datacenters
     if dcs, err := f.DatacenterList(ctx, "*"); err == nil {
@@ -179,37 +188,82 @@ func buildDynamicSchema(ctx context.Context, vc *govmomi.Client) (string, error)
         for _, dc := range dcs {
             vals = append(vals, dc.Name())
         }
+        logger.Info("found datacenters", zap.Strings("datacenters", vals))
         injectEnum(props, "datacenter", vals)
+    } else {
+        logger.Warn("failed to query datacenters", zap.Error(err))
     }
 
-    // Clusters
-    if cls, err := f.ClusterComputeResourceList(ctx, "*"); err == nil {
-        vals := make([]string, 0, len(cls))
-        for _, c := range cls {
-            vals = append(vals, c.Name())
+    // Clusters - need to query within each datacenter
+    if dcs, err := f.DatacenterList(ctx, "*"); err == nil {
+        allClusters := make([]string, 0)
+        for _, dc := range dcs {
+            f.SetDatacenter(dc)
+            if cls, err := f.ClusterComputeResourceList(ctx, "*"); err == nil {
+                for _, c := range cls {
+                    allClusters = append(allClusters, c.Name())
+                }
+            }
         }
-        injectEnum(props, "cluster", vals)
+        // Reset finder to no specific datacenter
+        f.SetDatacenter(nil)
+        if len(allClusters) > 0 {
+            logger.Info("found clusters", zap.Strings("clusters", allClusters))
+            injectEnum(props, "cluster", allClusters)
+        }
+    } else {
+        logger.Warn("failed to query clusters", zap.Error(err))
     }
 
-    // Datastores
-    if dss, err := f.DatastoreList(ctx, "*"); err == nil {
-        vals := make([]string, 0, len(dss))
-        for _, ds := range dss {
-            vals = append(vals, ds.Name())
+    // Datastores - query from each datacenter
+    if dcs, err := f.DatacenterList(ctx, "*"); err == nil {
+        allDatastores := make([]string, 0)
+        for _, dc := range dcs {
+            f.SetDatacenter(dc)
+            if dss, err := f.DatastoreList(ctx, "*"); err == nil {
+                for _, ds := range dss {
+                    allDatastores = append(allDatastores, ds.Name())
+                }
+            } else {
+                logger.Warn("failed to query datastores for datacenter", zap.String("datacenter", dc.Name()), zap.Error(err))
+            }
         }
-        injectEnum(props, "datastore", vals)
+        // Reset finder to no specific datacenter
+        f.SetDatacenter(nil)
+        if len(allDatastores) > 0 {
+            logger.Info("found datastores", zap.Strings("datastores", allDatastores))
+            injectEnum(props, "datastore", allDatastores)
+        }
+    } else {
+        logger.Warn("failed to query datacenters for datastores", zap.Error(err))
     }
 
-    // Networks / Port Groups
-    if nets, err := f.NetworkList(ctx, "*"); err == nil {
-        vals := make([]string, 0, len(nets))
-        for _, n := range nets {
-            // Use the managed object reference ID as value; name retrieval is more involved
-            vals = append(vals, n.Reference().Value)
+    // Networks / Port Groups - query from each datacenter
+    if dcs, err := f.DatacenterList(ctx, "*"); err == nil {
+        allNetworks := make([]string, 0)
+        
+        for _, dc := range dcs {
+            f.SetDatacenter(dc)
+            if nets, err := f.NetworkList(ctx, "*"); err == nil {
+                // Get network names directly without type casting to avoid DVS vs Network type conflicts
+                for _, net := range nets {
+                    allNetworks = append(allNetworks, net.GetInventoryPath())
+                }
+            } else {
+                logger.Warn("failed to query networks for datacenter", zap.String("datacenter", dc.Name()), zap.Error(err))
+            }
         }
-        if len(vals) > 0 {
-            injectEnum(props, "port_group", vals)
+        
+        // Reset finder to no specific datacenter
+        f.SetDatacenter(nil)
+        if len(allNetworks) > 0 {
+            logger.Info("found networks/port groups", zap.Strings("networks", allNetworks))
+            injectEnum(props, "port_group", allNetworks)
+        } else {
+            logger.Warn("no port groups found to inject")
         }
+    } else {
+        logger.Warn("failed to query datacenters for networks", zap.Error(err))
     }
 
     // Templates: list VMs and filter by Config.Template
@@ -233,6 +287,89 @@ func buildDynamicSchema(ctx context.Context, vc *govmomi.Client) (string, error)
         }
     }
 
+    // Content Libraries and their items
+    if restClient := rest.NewClient(vc.Client); restClient != nil {
+        // Use the same user credentials from the SOAP client
+        restURL := *vc.Client.URL()
+        if err := restClient.Login(ctx, restURL.User); err == nil {
+            libManager := library.NewManager(restClient)
+            
+            // Content Libraries
+            if libs, err := libManager.GetLibraries(ctx); err == nil {
+                libVals := make([]string, 0, len(libs))
+                itemVals := make([]string, 0)
+                
+                for _, lib := range libs {
+                    libVals = append(libVals, lib.Name)
+                    
+                    // Get items for each library
+                    if items, err := libManager.GetLibraryItems(ctx, lib.ID); err == nil {
+                        for _, item := range items {
+                            itemVals = append(itemVals, item.Name)
+                        }
+                    }
+                }
+                
+                logger.Info("found content libraries", zap.Strings("libraries", libVals))
+                logger.Info("found content library items", zap.Strings("items", itemVals))
+                
+                if len(libVals) > 0 {
+                    injectEnum(props, "content_library", libVals)
+                }
+                if len(itemVals) > 0 {
+                    injectEnum(props, "content_library_item", itemVals)
+                }
+            } else {
+                logger.Warn("failed to query content libraries", zap.Error(err))
+            }
+        } else {
+            logger.Info("initial REST login failed, attempting manual login with username/password", zap.Error(err))
+            // Try manual login with username/password if URL credentials don't work
+            username := os.Getenv("VSPHERE_USERNAME")
+            password := os.Getenv("VSPHERE_PASSWORD")
+            if username != "" && password != "" {
+                // Create new credentials URL for REST login
+                restURL.User = url.UserPassword(username, password)
+                if err := restClient.Login(ctx, restURL.User); err == nil {
+                    libManager := library.NewManager(restClient)
+                    
+                    // Content Libraries
+                    if libs, err := libManager.GetLibraries(ctx); err == nil {
+                        libVals := make([]string, 0, len(libs))
+                        itemVals := make([]string, 0)
+                        
+                        for _, lib := range libs {
+                            libVals = append(libVals, lib.Name)
+                            
+                            // Get items for each library
+                            if items, err := libManager.GetLibraryItems(ctx, lib.ID); err == nil {
+                                for _, item := range items {
+                                    itemVals = append(itemVals, item.Name)
+                                }
+                            }
+                        }
+                        
+                        logger.Info("found content libraries via manual login", zap.Strings("libraries", libVals))
+                        logger.Info("found content library items via manual login", zap.Strings("items", itemVals))
+                        
+                        if len(libVals) > 0 {
+                            injectEnum(props, "content_library", libVals)
+                        }
+                        if len(itemVals) > 0 {
+                            injectEnum(props, "content_library_item", itemVals)
+                        }
+                    } else {
+                        logger.Warn("failed to query content libraries after manual login", zap.Error(err))
+                    }
+                } else {
+                    logger.Warn("manual REST login also failed", zap.Error(err))
+                }
+            }
+        }
+    } else {
+        logger.Warn("failed to create vSphere REST client")
+    }
+
     out, err := json.Marshal(m)
     if err != nil {
         return "", fmt.Errorf("marshal schema: %w", err)
@@ -242,7 +379,10 @@ func buildDynamicSchema(ctx context.Context, vc *govmomi.Client) (string, error)
 
 func injectEnum(props map[string]any, key string, values []string) {
     p, ok := props[key].(map[string]any)
-    if !ok || len(values) == 0 {
+    if !ok {
+        return
+    }
+    if len(values) == 0 {
         return
     }
     arr := make([]any, 0, len(values))

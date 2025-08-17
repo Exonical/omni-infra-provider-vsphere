@@ -1,6 +1,6 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2025-07-24T12:03:40Z by kres 4c6b4c0.
+# Generated on 2025-08-17T01:11:24Z by kres 696c7c7.
 
 # common variables
 
@@ -73,10 +73,6 @@ COMMON_ARGS += --build-arg=GOLANGCILINT_VERSION="$(GOLANGCILINT_VERSION)"
 COMMON_ARGS += --build-arg=GOFUMPT_VERSION="$(GOFUMPT_VERSION)"
 COMMON_ARGS += --build-arg=TESTPKGS="$(TESTPKGS)"
 TOOLCHAIN ?= docker.io/golang:1.24-alpine
-
-# extra variables
-
-REMOVE_VOLUMES ?= false
 
 # help menu
 
@@ -167,11 +163,11 @@ local-%:  ## Builds the specified target defined in the Dockerfile using the loc
 	    fi; \
 	  done'
 
-generate:  ## Generate .proto definitions.
-	@$(MAKE) local-$@ DEST=./
-
 lint-golangci-lint:  ## Runs golangci-lint linter.
 	@$(MAKE) target-$@
+
+lint-golangci-lint-fmt:  ## Runs golangci-lint formatter and tries to fix issues automatically.
+	@$(MAKE) local-$@ DEST=.
 
 lint-gofumpt:  ## Runs gofumpt linter.
 	@$(MAKE) target-$@
@@ -220,17 +216,6 @@ lint: lint-golangci-lint lint-gofumpt lint-govulncheck lint-markdown  ## Run all
 image-omni-infra-provider-vsphere:  ## Builds image for omni-infra-provider-vsphere.
 	@$(MAKE) registry-$@ IMAGE_NAME="omni-infra-provider-vsphere"
 
-.PHONY: docker-compose-up
-docker-compose-up:
-	ARTIFACTS="$(ARTIFACTS)" SHA="$(SHA)" TAG="$(TAG)" USERNAME="$(USERNAME)" REGISTRY="$(REGISTRY)" PROTOBUF_TS_VERSION="$(PROTOBUF_TS_VERSION)" NODE_BUILD_ARGS="$(NODE_BUILD_ARGS)" TOOLCHAIN="$(TOOLCHAIN)" CGO_ENABLED="$(CGO_ENABLED)" GO_BUILDFLAGS="$(GO_BUILDFLAGS)" GOLANGCILINT_VERSION="$(GOLANGCILINT_VERSION)" GOFUMPT_VERSION="$(GOFUMPT_VERSION)" GOIMPORTS_VERSION="$(GOIMPORTS_VERSION)" PROTOBUF_GO_VERSION="$(PROTOBUF_GO_VERSION)" GRPC_GO_VERSION="$(GRPC_GO_VERSION)" GRPC_GATEWAY_VERSION="$(GRPC_GATEWAY_VERSION)" VTPROTOBUF_VERSION="$(VTPROTOBUF_VERSION)" DEEPCOPY_VERSION="$(DEEPCOPY_VERSION)" TESTPKGS="$(TESTPKGS)" COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 GO_LDFLAGS="$(GO_LDFLAGS)" docker compose -p talemu --file ./hack/compose/docker-compose.yml --file ./hack/compose/docker-compose.override.yml up --build
-
-.PHONY: docker-compose-down
-docker-compose-down:
-	ARTIFACTS="$(ARTIFACTS)" SHA="$(SHA)" TAG="$(TAG)" USERNAME="$(USERNAME)" REGISTRY="$(REGISTRY)" PROTOBUF_TS_VERSION="$(PROTOBUF_TS_VERSION)" NODE_BUILD_ARGS="$(NODE_BUILD_ARGS)" TOOLCHAIN="$(TOOLCHAIN)" CGO_ENABLED="$(CGO_ENABLED)" GO_BUILDFLAGS="$(GO_BUILDFLAGS)" GOLANGCILINT_VERSION="$(GOLANGCILINT_VERSION)" GOFUMPT_VERSION="$(GOFUMPT_VERSION)" GOIMPORTS_VERSION="$(GOIMPORTS_VERSION)" PROTOBUF_GO_VERSION="$(PROTOBUF_GO_VERSION)" GRPC_GO_VERSION="$(GRPC_GO_VERSION)" GRPC_GATEWAY_VERSION="$(GRPC_GATEWAY_VERSION)" VTPROTOBUF_VERSION="$(VTPROTOBUF_VERSION)" DEEPCOPY_VERSION="$(DEEPCOPY_VERSION)" TESTPKGS="$(TESTPKGS)" COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 GO_LDFLAGS="$(GO_LDFLAGS)" docker compose -p talemu --file ./hack/compose/docker-compose.yml --file ./hack/compose/docker-compose.override.yml down --rmi local --remove-orphans --volumes=$(REMOVE_VOLUMES)
-
-run-integration-test: omni-infra-provider-vsphere
-	@hack/test/integration.sh
-
 .PHONY: rekres
 rekres:
 	@docker pull $(KRES_IMAGE)
@@ -249,3 +234,4 @@ release-notes: $(ARTIFACTS)
 conformance:
 	@docker pull $(CONFORMANCE_IMAGE)
 	@docker run --rm -it -v $(PWD):/src -w /src $(CONFORMANCE_IMAGE) enforce
+

@@ -6,14 +6,14 @@
 package resources
 
 import (
+	providermeta "github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/meta"
+
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/meta"
 	"github.com/cosi-project/runtime/pkg/resource/protobuf"
 	"github.com/cosi-project/runtime/pkg/resource/typed"
-	"github.com/siderolabs/omni/client/pkg/infra"
-
 	specs "github.com/siderolabs/omni/client/api/omni/specs"
-	providermeta "github.com/siderolabs/omni-infra-provider-kubevirt/internal/pkg/provider/meta"
+	"github.com/siderolabs/omni/client/pkg/infra"
 )
 
 // NewMachine creates new Machine.

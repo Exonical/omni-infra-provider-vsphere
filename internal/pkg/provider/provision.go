@@ -60,7 +60,7 @@ type Provisioner struct {
 //     <PEM>
 //
 // The result is returned as a single multi-document YAML string.
-func buildJoinConfigWithOptionalAdditions(baseJoinConfig, vmName string) string {
+func buildJoinConfigWithOptionalAdditions(baseJoinConfig, _ string) string {
     // Prefer file path, fallback to direct content.
     caPath := os.Getenv("OMNI_CA_BUNDLE_PATH")
     caPEM := os.Getenv("OMNI_CA_BUNDLE")
@@ -75,7 +75,7 @@ func buildJoinConfigWithOptionalAdditions(baseJoinConfig, vmName string) string 
     // We'll build output incrementally; start with base config.
     out := strings.TrimRight(baseJoinConfig, "\n") + "\n"
 
-    if caPEM == "" && vmName == "" {
+    if caPEM == "" {
         return out
     }
 
@@ -103,30 +103,14 @@ func buildJoinConfigWithOptionalAdditions(baseJoinConfig, vmName string) string 
         indented.WriteString("\n")
     }
 
-    if caPEM != "" {
-        trustedRoots := strings.Builder{}
-        trustedRoots.WriteString("---\n")
-        trustedRoots.WriteString("apiVersion: v1alpha1\n")
-        trustedRoots.WriteString("kind: TrustedRootsConfig\n")
-        trustedRoots.WriteString("name: custom-ca\n")
-        trustedRoots.WriteString("certificates: |-\n")
-        trustedRoots.WriteString(indented.String())
-        out += trustedRoots.String()
-    }
-
-    if vmName != "" {
-        // Append hostname configuration as another document in Talos schema.
-        // Format:
-        // version: v1alpha1
-        // machine:
-        //   network:
-        //     hostname: <vmName>
-        out += "---\n"
-        out += "version: v1alpha1\n"
-        out += "machine:\n"
-        out += "  network:\n"
-        out += "    hostname: " + vmName + "\n"
-    }
+    trustedRoots := strings.Builder{}
+    trustedRoots.WriteString("---\n")
+    trustedRoots.WriteString("apiVersion: v1alpha1\n")
+    trustedRoots.WriteString("kind: TrustedRootsConfig\n")
+    trustedRoots.WriteString("name: custom-ca\n")
+    trustedRoots.WriteString("certificates: |-\n")
+    trustedRoots.WriteString(indented.String())
+    out += trustedRoots.String()
 
     return out
 }

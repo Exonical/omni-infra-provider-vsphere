@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/siderolabs/omni/client/pkg/infra/provision"
@@ -24,6 +25,7 @@ import (
 	"github.com/vmware/govmomi/vapi/vcenter"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
+	"github.com/vmware/govmomi/view"
 	"go.uber.org/zap"
 
 	"github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/resources"
@@ -45,6 +47,126 @@ import (
 type Provisioner struct {
 	vsphereClient *govmomi.Client
 	logger        *zap.Logger
+}
+
+// buildJoinConfigWithOptionalAdditions appends optional YAML documents to the provided JoinConfig:
+// - TrustedRootsConfig if OMNI_CA_BUNDLE_PATH or OMNI_CA_BUNDLE is set
+// - MachineConfig to set the hostname to vmName if vmName is non-empty
+//
+// apiVersion: v1alpha1
+// kind: TrustedRootsConfig
+// name: custom-ca
+// certificates: |-
+//     <PEM>
+//
+// The result is returned as a single multi-document YAML string.
+func buildJoinConfigWithOptionalAdditions(baseJoinConfig, vmName string) string {
+    // Prefer file path, fallback to direct content.
+    caPath := os.Getenv("OMNI_CA_BUNDLE_PATH")
+    caPEM := os.Getenv("OMNI_CA_BUNDLE")
+
+    if caPath != "" {
+        if b, err := os.ReadFile(caPath); err == nil {
+            caPEM = string(b)
+        }
+    }
+
+    caPEM = strings.TrimSpace(caPEM)
+    // We'll build output incrementally; start with base config.
+    out := strings.TrimRight(baseJoinConfig, "\n") + "\n"
+
+    if caPEM == "" && vmName == "" {
+        return out
+    }
+
+    // If the provided value doesn't look like PEM, try to base64-decode it.
+    if !strings.Contains(caPEM, "-----BEGIN") {
+        // Remove whitespace/newlines for robust decoding.
+        compact := strings.Map(func(r rune) rune {
+            switch r {
+            case ' ', '\n', '\r', '\t':
+                return -1
+            default:
+                return r
+            }
+        }, caPEM)
+        if decoded, err := base64.StdEncoding.DecodeString(compact); err == nil {
+            caPEM = string(decoded)
+        }
+    }
+
+    // Indent cert lines by 4 spaces under the YAML block scalar.
+    var indented strings.Builder
+    for _, line := range strings.Split(caPEM, "\n") {
+        indented.WriteString("    ")
+        indented.WriteString(line)
+        indented.WriteString("\n")
+    }
+
+    if caPEM != "" {
+        trustedRoots := strings.Builder{}
+        trustedRoots.WriteString("---\n")
+        trustedRoots.WriteString("apiVersion: v1alpha1\n")
+        trustedRoots.WriteString("kind: TrustedRootsConfig\n")
+        trustedRoots.WriteString("name: custom-ca\n")
+        trustedRoots.WriteString("certificates: |-\n")
+        trustedRoots.WriteString(indented.String())
+        out += trustedRoots.String()
+    }
+
+    if vmName != "" {
+        // Append hostname configuration as another document in Talos schema.
+        // Format:
+        // version: v1alpha1
+        // machine:
+        //   network:
+        //     hostname: <vmName>
+        out += "---\n"
+        out += "version: v1alpha1\n"
+        out += "machine:\n"
+        out += "  network:\n"
+        out += "    hostname: " + vmName + "\n"
+    }
+
+    return out
+}
+
+// findVMByNameAnywhere searches the entire vCenter inventory for a VM with the given name.
+func (p *Provisioner) findVMByNameAnywhere(ctx context.Context, name string) (*object.VirtualMachine, error) {
+    m := view.NewManager(p.vsphereClient.Client)
+
+    v, err := m.CreateContainerView(ctx, p.vsphereClient.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create container view: %w", err)
+    }
+    defer func() { _ = v.Destroy(ctx) }()
+
+    var vms []mo.VirtualMachine
+    if err := v.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &vms); err != nil {
+        return nil, fmt.Errorf("failed to retrieve VMs from view: %w", err)
+    }
+
+    for i := range vms {
+        if vms[i].Name == name {
+            vm := object.NewVirtualMachine(p.vsphereClient.Client, vms[i].Reference())
+            return vm, nil
+        }
+    }
+
+    // Secondary attempt: use Finder to list all VMs and match by name
+    finder := find.NewFinder(p.vsphereClient.Client, true)
+    all, ferr := finder.VirtualMachineList(ctx, "*")
+    if ferr == nil {
+        for _, cand := range all {
+            if cand != nil {
+                if refName, nerr := cand.ObjectName(ctx); nerr == nil && refName == name {
+                    return cand, nil
+                }
+            }
+        }
+    }
+
+    return nil, fmt.Errorf("vm '%s' not found anywhere", name)
 }
 
 // NewProvisioner creates a new provisioner.
@@ -279,17 +401,20 @@ func (p *Provisioner) configureVM(ctx context.Context, vm *object.VirtualMachine
 		configSpec.BootOptions = &types.VirtualMachineBootOptions{EfiSecureBootEnabled: &sb}
 	}
 
-	// Set advanced parameters for Talos
-	configSpec.ExtraConfig = []types.BaseOptionValue{
-		&types.OptionValue{
-			Key:   "disk.enableUUID",
-			Value: "1",
-		},
-		&types.OptionValue{
-			Key:   "guestinfo.talos.config",
-			Value: base64.StdEncoding.EncodeToString([]byte(pctx.ConnectionParams.JoinConfig)),
-		},
-	}
+	// Set advanced parameters for Talos: single base64-encoded key
+	    // Build JoinConfig with optional CA and hostname injection.
+    joinCfg := buildJoinConfigWithOptionalAdditions(pctx.ConnectionParams.JoinConfig, pctx.GetRequestID())
+
+    configSpec.ExtraConfig = []types.BaseOptionValue{
+        &types.OptionValue{
+            Key:   "disk.enableUUID",
+            Value: "1",
+        },
+        &types.OptionValue{
+            Key:   "guestinfo.talos.config",
+            Value: base64.StdEncoding.EncodeToString([]byte(joinCfg)),
+        },
+    }
 
 	// Apply the configuration
 	task, err := vm.Reconfigure(ctx, configSpec)
@@ -547,12 +672,18 @@ func (p *Provisioner) destroyVM(ctx context.Context, logger *zap.Logger, pctx pr
 	vm, err := finder.VirtualMachine(ctx, pctx.GetRequestID())
 	if err != nil {
 		if err.Error() == "vm '"+pctx.GetRequestID()+"' not found" {
-			logger.Info("VM already deleted or does not exist")
+			logger.Info("VM not found in datacenter, attempting global inventory search", zap.String("vm", pctx.GetRequestID()))
 
-			return nil
+			// Fallback: search anywhere in inventory by name
+			vm, err = p.findVMByNameAnywhere(ctx, pctx.GetRequestID())
+			if err != nil {
+				logger.Info("VM not found across inventory; treating as already deleted", zap.String("vm", pctx.GetRequestID()))
+
+				return nil
+			}
+		} else {
+			return fmt.Errorf("failed to find VM %s for deprovisioning: %w", pctx.GetRequestID(), err)
 		}
-
-		return fmt.Errorf("failed to find VM %s for deprovisioning: %w", pctx.GetRequestID(), err)
 	}
 
 	logger.Info("destroying VM", zap.String("vm", pctx.GetRequestID()))
@@ -566,9 +697,9 @@ func (p *Provisioner) destroyVM(ctx context.Context, logger *zap.Logger, pctx pr
 	} else if vmProps.Summary.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
 		logger.Info("powering off VM before destruction")
 
-		powerOffTask, poErr := vm.PowerOff(ctx)
-		if poErr != nil {
-			logger.Warn("failed to power off VM, proceeding with destruction", zap.Error(poErr))
+		powerOffTask, pErr := vm.PowerOff(ctx)
+		if pErr != nil {
+			logger.Warn("failed to power off VM, proceeding with destruction", zap.Error(pErr))
 		} else {
 			if wErr := powerOffTask.Wait(ctx); wErr != nil {
 				logger.Warn("failed to wait for power off, proceeding with destruction", zap.Error(wErr))
@@ -611,21 +742,24 @@ func (p *Provisioner) createCloneSpec(
 		return nil, nil, fmt.Errorf("failed to get device changes: %w", err)
 	}
 
-	config := types.VirtualMachineConfigSpec{
-		NumCPUs:      data.CPUs,
-		MemoryMB:     data.MemoryMB,
-		DeviceChange: deviceChanges,
-		ExtraConfig: []types.BaseOptionValue{
-			&types.OptionValue{
-				Key:   "disk.enableUUID",
-				Value: "1",
-			},
-			&types.OptionValue{
-				Key:   "guestinfo.talos.config",
-				Value: base64.StdEncoding.EncodeToString([]byte(pctx.ConnectionParams.JoinConfig)),
-			},
-		},
-	}
+	    // Build JoinConfig with optional CA and hostname injection.
+    joinCfg := buildJoinConfigWithOptionalAdditions(pctx.ConnectionParams.JoinConfig, pctx.GetRequestID())
+
+    config := types.VirtualMachineConfigSpec{
+        NumCPUs:      data.CPUs,
+        MemoryMB:     data.MemoryMB,
+        DeviceChange: deviceChanges,
+        ExtraConfig: []types.BaseOptionValue{
+            &types.OptionValue{
+                Key:   "disk.enableUUID",
+                Value: "1",
+            },
+            &types.OptionValue{
+                Key:   "guestinfo.talos.config",
+                Value: base64.StdEncoding.EncodeToString([]byte(joinCfg)),
+            },
+        },
+    }
 
 	// Enable EFI Secure Boot if requested
 	if data.SecureBoot {
@@ -659,11 +793,60 @@ func (p *Provisioner) createCloneSpec(
 
 // Deprovision implements infra.Provisioner.
 func (p *Provisioner) Deprovision(ctx context.Context, logger *zap.Logger, state *resources.Machine, machineRequest *infra.MachineRequest) error {
-    // No-op: step-based deprovisioning handles VM destruction correctly via destroyVM().
-    // Some controllers may still call this method; returning nil avoids spurious reconcile errors.
-    // Actual deprovisioning is performed in DeprovisionSteps().
+    // Some controllers may call this direct path instead of step-based flow.
+    if machineRequest == nil {
+        if logger != nil {
+            logger.Warn("machineRequest is nil; nothing to deprovision")
+        }
+        return nil
+    }
+
+    vmName := machineRequest.Metadata().ID()
     if logger != nil {
-        logger.Info("delegating deprovision to step-based flow (destroyVM)")
+        logger.Info("direct deprovision invoked; attempting global VM deletion", zap.String("vm_id", vmName))
+    }
+
+    // Locate the VM anywhere in inventory by name.
+    vm, err := p.findVMByNameAnywhere(ctx, vmName)
+    if err != nil {
+        if logger != nil {
+            logger.Info("VM not found across inventory; treating as already deleted", zap.String("vm", vmName))
+        }
+        return nil
+    }
+
+    // Power off if needed, then destroy.
+    var vmProps mo.VirtualMachine
+    pc := property.DefaultCollector(p.vsphereClient.Client)
+    if propErr := pc.RetrieveOne(ctx, vm.Reference(), []string{"summary"}, &vmProps); propErr != nil {
+        if logger != nil {
+            logger.Warn("failed to retrieve VM power state, proceeding with destruction", zap.Error(propErr))
+        }
+    } else if vmProps.Summary.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
+        if logger != nil {
+            logger.Info("powering off VM before destruction", zap.String("vm", vmName))
+        }
+        if powerOffTask, poErr := vm.PowerOff(ctx); poErr != nil {
+            if logger != nil {
+                logger.Warn("failed to power off VM, proceeding with destruction", zap.Error(poErr))
+            }
+        } else if wErr := powerOffTask.Wait(ctx); wErr != nil {
+            if logger != nil {
+                logger.Warn("failed to wait for power off, proceeding with destruction", zap.Error(wErr))
+            }
+        }
+    }
+
+    destroyTask, derr := vm.Destroy(ctx)
+    if derr != nil {
+        return fmt.Errorf("failed to destroy VM: %w", derr)
+    }
+    if err := destroyTask.Wait(ctx); err != nil {
+        return fmt.Errorf("failed to wait for VM destruction: %w", err)
+    }
+
+    if logger != nil {
+        logger.Info("VM destroyed successfully", zap.String("vm", vmName))
     }
 
     return nil

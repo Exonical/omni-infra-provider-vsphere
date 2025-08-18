@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/siderolabs/omni/client/pkg/infra/provision"
@@ -319,14 +320,39 @@ func (p *Provisioner) deployFromContentLibrary(
 	itemName string,
 	pctx provision.Context[*resources.Machine],
 ) error {
-	// Initialize REST client using the existing SOAP client credentials
+	// Initialize REST client and authenticate.
 	restClient := rest.NewClient(p.vsphereClient.Client)
-	restURL := *p.vsphereClient.URL()
-	password, _ := restURL.User.Password()
-	p.logger.Info("performing REST login", zap.String("user", restURL.User.Username()))
 
-	if err := restClient.Login(ctx, url.UserPassword(restURL.User.Username(), password)); err != nil {
-		return fmt.Errorf("failed REST login: %w", err)
+	loggedIn := false
+
+	// 1) Try credentials embedded in the SOAP client's URL, if present.
+	restURL := *p.vsphereClient.URL()
+	if restURL.User != nil {
+		triedUser := restURL.User.Username()
+		p.logger.Info("performing REST login via URL creds", zap.String("user", triedUser))
+		if err := restClient.Login(ctx, restURL.User); err == nil {
+			loggedIn = true
+		} else {
+			p.logger.Warn("REST login via URL creds failed", zap.String("user", triedUser), zap.Error(err))
+		}
+	}
+
+	// 2) Fall back to environment variables (as used by main), if available.
+	if !loggedIn {
+		envUser := os.Getenv("VSPHERE_USERNAME")
+		envPass := os.Getenv("VSPHERE_PASSWORD")
+		if envUser != "" && envPass != "" {
+			p.logger.Info("performing REST login via environment creds", zap.String("user", envUser))
+			if err := restClient.Login(ctx, url.UserPassword(envUser, envPass)); err == nil {
+				loggedIn = true
+			} else {
+				return fmt.Errorf("failed REST login via env creds: %w", err)
+			}
+		}
+	}
+
+	if !loggedIn {
+		return fmt.Errorf("failed REST login: no credentials available in SOAP URL or environment")
 	}
 
 	libMgr := library.NewManager(restClient)

@@ -74,12 +74,34 @@ func (m *Machine) ResourceDefinition() meta.ResourceDefinitionSpec {
 
 // UnmarshalProto ensures the embedded typed resource is initialized and delegates to it.
 func (m *Machine) UnmarshalProto(md *resource.Metadata, b []byte) error {
-    if m.Resource == nil {
-        m.Resource = typed.NewResource[MachineSpec, *MachineExtension](
-            resource.NewMetadata("", infra.ResourceType("Machine", providermeta.ProviderID), "", resource.VersionUndefined),
-            protobuf.NewResourceSpec(&specs.MachineSpec{}),
-        )
-    }
+	if m.Resource == nil {
+		m.Resource = typed.NewResource[MachineSpec, *MachineExtension](
+			resource.NewMetadata("", infra.ResourceType("Machine", providermeta.ProviderID), "", resource.VersionUndefined),
+			protobuf.NewResourceSpec(&specs.MachineSpec{}),
+		)
+	}
 
-    return m.Resource.UnmarshalProto(md, b)
+	return m.Resource.UnmarshalProto(md, b)
+}
+
+// ensureInit lazily initializes the embedded typed.Resource if nil.
+func (m *Machine) ensureInit() {
+	if m.Resource == nil {
+		m.Resource = typed.NewResource[MachineSpec, *MachineExtension](
+			resource.NewMetadata("", infra.ResourceType("Machine", providermeta.ProviderID), "", resource.VersionUndefined),
+			protobuf.NewResourceSpec(&specs.MachineSpec{}),
+		)
+	}
+}
+
+// Metadata returns a non-nil metadata, initializing the resource if needed.
+func (m *Machine) Metadata() *resource.Metadata {
+	m.ensureInit()
+	return m.Resource.Metadata()
+}
+
+// TypedSpec returns the typed spec, initializing the resource if needed.
+func (m *Machine) TypedSpec() *MachineSpec {
+    m.ensureInit()
+    return m.Resource.TypedSpec()
 }

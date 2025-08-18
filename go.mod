@@ -10,6 +10,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/vmware/govmomi v0.51.0
 	go.uber.org/zap v1.27.0
+	google.golang.org/protobuf v1.36.7
 )
 
 require (
@@ -26,7 +27,6 @@ require (
 	github.com/containernetworking/cni v1.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gertd/go-pluralize v0.2.1 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/google/cel-go v0.26.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -76,6 +76,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250811230008-5f3141c8851a // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250811230008-5f3141c8851a // indirect
 	google.golang.org/grpc v1.74.2 // indirect
-	google.golang.org/protobuf v1.36.7 // indirect
 	gopkg.in/yaml.v3 v3.0.3 // indirect
 )

@@ -6,39 +6,80 @@
 package resources
 
 import (
-	providermeta "github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/meta"
-
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/meta"
 	"github.com/cosi-project/runtime/pkg/resource/protobuf"
 	"github.com/cosi-project/runtime/pkg/resource/typed"
 	specs "github.com/siderolabs/omni/client/api/omni/specs"
 	"github.com/siderolabs/omni/client/pkg/infra"
+
+	providermeta "github.com/siderolabs/omni-infra-provider-vsphere/internal/pkg/provider/meta"
 )
-
-// NewMachine creates new Machine.
-func NewMachine(ns, id string) *Machine {
-	return typed.NewResource[MachineSpec, MachineExtension](
-		resource.NewMetadata(ns, infra.ResourceType("Machine", providermeta.ProviderID), id, resource.VersionUndefined),
-		protobuf.NewResourceSpec(&specs.MachineSpec{}),
-	)
-}
-
-// Machine describes fake machine configuration.
-type Machine = typed.Resource[MachineSpec, MachineExtension]
 
 // MachineSpec wraps specs.MachineSpec.
 type MachineSpec = protobuf.ResourceSpec[specs.MachineSpec, *specs.MachineSpec]
 
-// MachineExtension providers auxiliary methods for Machine resource.
+// MachineExtension provides auxiliary methods for Machine resource.
 type MachineExtension struct{}
 
 // ResourceDefinition implements [typed.Extension] interface.
-func (MachineExtension) ResourceDefinition() meta.ResourceDefinitionSpec {
+func (e *MachineExtension) ResourceDefinition() meta.ResourceDefinitionSpec {
 	return meta.ResourceDefinitionSpec{
 		Type:             infra.ResourceType("Machine", providermeta.ProviderID),
 		Aliases:          []resource.Type{},
 		DefaultNamespace: infra.ResourceNamespace(providermeta.ProviderID),
 		PrintColumns:     []meta.PrintColumn{},
 	}
+}
+
+// Machine describes a machine configuration.
+type Machine struct {
+	*typed.Resource[MachineSpec, *MachineExtension]
+}
+
+// NewMachine creates a new Machine resource.
+func NewMachine() *Machine {
+	return &Machine{
+		Resource: typed.NewResource[MachineSpec, *MachineExtension](
+			resource.NewMetadata("", infra.ResourceType("Machine", providermeta.ProviderID), "", resource.VersionUndefined),
+			protobuf.NewResourceSpec(&specs.MachineSpec{}),
+		),
+	}
+}
+
+// New creates a new Machine resource - satisfies infra.RD interface.
+func (*Machine) New() resource.Resource {
+	return NewMachine()
+}
+
+// DeepCopy implements resource.Resource.
+func (m *Machine) DeepCopy() resource.Resource {
+	if m == nil {
+		return nil
+	}
+	// DeepCopy returns resource.Resource; ensure type assertion is safe
+	cp := m.Resource.DeepCopy()
+	if tr, ok := cp.(*typed.Resource[MachineSpec, *MachineExtension]); ok {
+		return &Machine{Resource: tr}
+	}
+
+	// Fallback to a fresh resource if assertion fails
+	return NewMachine()
+}
+
+// ResourceDefinition implements part of [resource.Resource] interface.
+func (m *Machine) ResourceDefinition() meta.ResourceDefinitionSpec {
+	return (&MachineExtension{}).ResourceDefinition()
+}
+
+// UnmarshalProto ensures the embedded typed resource is initialized and delegates to it.
+func (m *Machine) UnmarshalProto(md *resource.Metadata, b []byte) error {
+    if m.Resource == nil {
+        m.Resource = typed.NewResource[MachineSpec, *MachineExtension](
+            resource.NewMetadata("", infra.ResourceType("Machine", providermeta.ProviderID), "", resource.VersionUndefined),
+            protobuf.NewResourceSpec(&specs.MachineSpec{}),
+        )
+    }
+
+    return m.Resource.UnmarshalProto(md, b)
 }
